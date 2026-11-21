@@ -18,7 +18,7 @@ import { useVisionSupport } from '@/hooks/useVisionSupport';
 import { api, configApi, optimizeApi } from '@/api/client';
 import { showToast } from '@/utils/toastStore';
 import { translate, useI18n } from '@/i18n';
-import { setDefaultProcessView, getDefaultProcessCollapsed } from '@/utils/process-view-config';
+import { setDefaultProcessView, useProcessView, hasStreamingAnswer } from '@/utils/process-view-config';
 import type { Message, PendingImage, RefChip, ToolCallRecord } from '@/types';
 import { combineChipsToMessage, messageToDraft } from '@/utils/ref-chips';
 import { on } from '@/utils/eventBus';
@@ -107,6 +107,7 @@ export function shouldWrapProcessSection({
 
 export function ChatPanel() {
   const { t } = useI18n();
+  const processView = useProcessView();
   const currentSessionId = useAppStore((s) => s.currentSessionId);
   const setCurrentSession = useAppStore((s) => s.setCurrentSession);
   const setSessions = useAppStore((s) => s.setSessions);
@@ -160,7 +161,7 @@ export function ChatPanel() {
         const config = await configApi.getFull();
         if (!cancelled) setDefaultProcessView(config.ui?.default_process_view);
       } catch {
-        // 读取失败保持内存默认(full),不打扰
+        // 读取失败保持内存默认(auto),不打扰
       }
     })();
     return () => {
@@ -172,6 +173,7 @@ export function ChatPanel() {
   // 文本/思考段落渲染为 assistant 气泡,连续普通工具合并为 timeline,todo_write 独立卡片;
   // ask_user 由 HistoryRenderer 内联渲染(数据源 waiting_user 事件,不在流式行重复出现)。
   const streamRows = useMemo(() => {
+    if (processView === 'auto') return [];
     const rows: ReactNode[] = [];
     const toolMap = new Map(toolCalls.map((tc) => [tc.id, tc]));
     // 最后一段 assistant(当前打开的流式段)才显示"思考中",其余历史上周显示"已思考"
@@ -185,6 +187,7 @@ export function ChatPanel() {
     // 当前"打开"的流式段 = 最后一段 assistant,且它确实在流的末尾(后面没有 tool 段)。
     // 若只有 assistant 后紧跟着 tool,说明这段文本已定稿,不应再带闪烁光标/思考中;
     // 否则最后一段已定稿的 assistant 在工具运行期间会一直被误标为 streaming。
+    const answering = hasStreamingAnswer(stream, isReasoning, toolCalls, webSearching);
     const tailIsAssistant = stream[stream.length - 1]?.kind === 'assistant';
     let tlBuf: ToolCallRecord[] = [];
     const flushTools = () => {
@@ -257,7 +260,7 @@ export function ChatPanel() {
             message={msg}
             isStreaming={isOpen}
             isReasoning={isReasoning && isOpen}
-            className={idx === lastAssistantIdx ? 'round-final-text' : undefined}
+            className={idx === lastAssistantIdx && answering ? 'round-final-text' : undefined}
           />,
         );
       } else {
@@ -314,7 +317,7 @@ export function ChatPanel() {
       return [
         <ProcessSection
           key={`process-${roundKey}`}
-          collapsed={collapsedRounds[roundKey] ?? getDefaultProcessCollapsed()}
+          collapsed={collapsedRounds[roundKey] ?? (processView !== 'full')}
           onToggle={() => toggleRoundCollapsed(roundKey)}
           hasThinking={hasThinking}
           toolCount={toolCount}
@@ -336,6 +339,7 @@ export function ChatPanel() {
     todoList,
     isSending,
     collapsedRounds,
+    processView,
     processStartedAt,
     processEndedAt,
     processTick,

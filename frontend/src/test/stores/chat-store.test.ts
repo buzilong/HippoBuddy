@@ -1,3 +1,4 @@
+import { setDefaultProcessView } from '@/utils/process-view-config';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useChatStore, EMPTY_SESSION_STREAM, type AskUserData } from '@/stores/chatStore';
 import { useAppStore } from '@/stores/appStore';
@@ -42,6 +43,7 @@ function attachConfirmation(name: 'bash' | 'delete_file') {
 
 describe('chatStore', () => {
   beforeEach(() => {
+    setDefaultProcessView('full');
     localStorage.clear();
     useAppStore.setState({ currentSessionId: 's1' });
     useChatStore.setState({ sessionStreams: {}, messageCache: {}, tokenUpdates: {}, tokenHistory: [] });
@@ -324,6 +326,7 @@ describe('chatStore', () => {
     st.routeSseEvent('s1', { event: 'content', data: { content: '你好' } } as never);
     st.routeSseEvent('s1', { event: 'content', data: { content: '世界' } } as never);
     expect(useChatStore.getState().sessionStreams.s1.stream).toHaveLength(1);
+    expect(useChatStore.getState().sessionStreams.s1.isReasoning).toBe(false);
     expect((useChatStore.getState().sessionStreams.s1.stream[0] as { text: string }).text).toBe('你好世界');
     // done 触发固化
     st.routeSseEvent('s1', { event: 'done', data: { reason: '' } } as never);
@@ -335,6 +338,7 @@ describe('chatStore', () => {
     const st = useChatStore.getState();
     st.routeSseEvent('s1', { event: 'thinking', data: { turn: 1 } } as never);
     st.routeSseEvent('s1', { event: 'tool_start', data: { id: 'bash-1', name: 'bash', args: '{}' } } as never);
+    expect(useChatStore.getState().sessionStreams.s1.isReasoning).toBe(false);
     st.routeSseEvent('s1', { event: 'tool_progress', data: { id: 'bash-1', line: 'out' } } as never);
     st.routeSseEvent('s1', { event: 'tool_result', data: { id: 'bash-1', name: 'bash', success: true, result: 'done', args: '{}' } } as never);
     const t = useChatStore.getState().sessionStreams.s1.toolCalls[0];

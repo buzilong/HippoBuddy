@@ -17,9 +17,11 @@ import { useSessionStream } from '@/hooks/useSessionStream';
 import { useChatStore } from '@/stores/chatStore';
 import { useAppStore } from '@/stores/appStore';
 import { useI18n } from '@/i18n';
-import { getDefaultProcessCollapsed } from '@/utils/process-view-config';
+import { useProcessView } from '@/utils/process-view-config';
 import { MessageBubble, MessageFooter } from './MessageBubble';
 import { ProcessSection } from './ProcessSection';
+import { ConversationFlow } from './ConversationFlow';
+import { buildConversationView } from './conversation-view';
 import { RollbackButton, RollbackPanel } from '../rollback/RollbackButton';
 import { useRollback } from '../rollback/useRollback';
 import {
@@ -165,9 +167,18 @@ function WithdrawableUserMessage({
 export const HistoryRenderer = forwardRef<HistoryRendererHandle, HistoryRendererProps>(
   function HistoryRenderer({ onRetry, onFork, onSendQuestion, onFillInput, tail }, ref) {
   const { t } = useI18n();
+  const processView = useProcessView();
   // 当前会话的流式分区(权威数据源;含 messages/isLoadingMessages/error/isSending 等)
   const {
     messages,
+    stream,
+    isReasoning,
+    webSearching,
+    webSearchActions,
+    todoList,
+    processInterrupted,
+    processStartedAt,
+    processEndedAt,
     isLoadingMessages: isLoading,
     error,
     isSending,
@@ -257,6 +268,7 @@ export const HistoryRenderer = forwardRef<HistoryRendererHandle, HistoryRenderer
     );
   }
 
+  let tailConsumed = false;
   const listRows = renderMessageRows();
   // 实时等待中渲染一张实时交互 ask 卡(整体末尾:历史 + 流式 tail 之后)。
   // 以 askUserData && waitingForUser 为准:请求提交后 commitAskUser 清空二者,
@@ -265,7 +277,7 @@ export const HistoryRenderer = forwardRef<HistoryRendererHandle, HistoryRenderer
   // 历史 ask 记录误抑制;刷新后的历史只读 ask 因 askUserData 为 null 本就不走这里。
   const liveAsk =
     askUserData && waitingForUser ? <AskUserCard key="ask-user-live" /> : null;
-  const baseRows = tail ? [...listRows, ...tail] : listRows;
+  const baseRows = tail && !tailConsumed ? [...listRows, ...tail] : listRows;
   // 推荐问答:回合 done 后异步生成,渲染在历史/流式/ask 卡之后。
   // 新回合开始(isSending=true)或推荐被消费后(suggestions 清空)自动隐藏。
   const suggestedBlock =
@@ -322,6 +334,7 @@ export const HistoryRenderer = forwardRef<HistoryRendererHandle, HistoryRenderer
     let roundText = '';
     let roundFiles: MessageFileProduct[] = [];
     let roundUserId: string | null = null;
+    let roundRenderId: string | null = null;
     let roundUserContent: string | null = null;
 
     const flushToolGroup = () => {
@@ -331,156 +344,186 @@ export const HistoryRenderer = forwardRef<HistoryRendererHandle, HistoryRenderer
     };
 
     const flushRound = () => {
-      if (round.length === 0) return;
+      const currentRound = roundUserId === (lastUser?.serverId ?? lastUser?.id);
+      const live = currentRound && !!stream?.length;
+      if (round.length === 0 && !(processView === 'auto' && currentRound && (live || isSending || processInterrupted))) return;
 
-      // ── 回合内 tool 结果索引:toolCallId → tool 消息(对齐旧版 HistoryRenderer 的 toolResults) ──
-      const toolResults = new Map<string, Message>();
-      for (const entry of round) {
-        if (entry.kind === 'tool-card') {
-          toolResults.set(entry.msg.toolCallId ?? entry.msg.id, entry.msg);
-        } else if (entry.kind === 'timeline') {
-          for (const m of entry.items) {
-            toolResults.set(m.toolCallId ?? m.id, m);
-          }
-        }
-      }
-      // 已被 assistant.tool_calls 消费的 tool 消息 id(避免重复渲染)
-      const consumed = new Set<string>();
-
-      // ── 回合处理过程内容(思维链气泡 + 工具时间线/卡片),统一包进 ProcessSection ──
-      const processRows: ReactNode[] = [];
-      let hasThinking = false;
-      let toolCount = 0;
-
-      // 回合最终正文段:回合内最后一个 assistant 段(而非 process-body 末尾子元素,
-      // 因回合可能以独立工具卡 / todo_write 收尾)。收起态据此保留该段正文,
-      // 与流式 tail(ChatPanel)对最后一段 assistant 打标记的逻辑保持一致。
-      let finalAssistantId: string | null = null;
-      for (let i = round.length - 1; i >= 0; i--) {
-        const entry = round[i];
-        if (entry.kind === 'assistant') {
-          finalAssistantId = entry.msg.id;
-          break;
-        }
-      }
-
-      round.forEach((entry) => {
-        if (entry.kind === 'assistant') {
-          if (entry.msg.reasoning_content) hasThinking = true;
-          processRows.push(
-            <MessageBubble
-              key={entry.msg.id}
-              message={entry.msg}
-              dataMessageId={entry.msg.id}
-              className={entry.msg.id === finalAssistantId ? 'round-final-text' : undefined}
-            />,
-          );
-
-          // ── 对齐旧版:用 assistant.tool_calls(含完整 args)+ 匹配的 tool 结果重建工具渲染。
-          //    实时流固化的内存消息没有 tool_calls,走下方 timeline/tool-card 退化分支。 ──
-          const calls = entry.msg.tool_calls;
-          if (calls && calls.length > 0) {
-            const tlItems: TimelineToolItem[] = [];
-            for (const tc of calls) {
-              const toolMsg = toolResults.get(tc.id);
-              consumed.add(toolMsg ? toolMsg.id : tc.id);
-              const item = buildToolItemFromCall(tc, toolMsg);
-              if (TIMELINE_STANDALONE_TOOLS.has(item.name)) {
-                // todo_write / ask_user:渲染完整独立卡片(带 args,todo 树可还原)。
-                // todo_write 做会话级累计:按 id 深合并增量,每张卡片显示完整累计树(对齐旧版)。
-                if (item.name === 'todo_write') {
-                  const { mode, todos } = parseTodoArgs(item.args);
-                  todoCache =
-                    mode === 'replace'
-                      ? deepMergeTodoList([], todos)
-                      : deepMergeTodoList(todoCache, todos);
-                  item.args = { mode, todos: todoCache };
-                }
-                toolCount++;
-                processRows.push(
-                  <ToolCardDispatcher key={item.id} record={toolItemToRecord(item)} />,
-                );
-              } else {
-                tlItems.push(item);
-              }
-            }
-            if (tlItems.length > 0) {
-              toolCount += tlItems.length;
-              processRows.push(<ToolTimeline key={`tl-${entry.msg.id}`} items={tlItems} />);
+      if (processView === 'auto') {
+        const committed = round.flatMap((entry) => entry.kind === 'timeline' ? entry.items : [entry.msg]);
+        const view = buildConversationView({ messages: committed, stream: live ? stream : [],
+          toolCalls: currentRound ? toolCalls : [], isSending: currentRound && isSending,
+          isReasoning: currentRound && isReasoning, webSearching: currentRound && webSearching,
+          webSearchActions: currentRound ? webSearchActions : [],
+          interrupted: currentRound && !!processInterrupted, initialTodos: todoCache, todoList,
+        });
+        todoCache = view.todos;
+        rows.push(<ConversationFlow key={`flow-${roundRenderId ?? committed[0]?.id ?? 'tail'}`} items={view.items} />);
+      } else {
+        // ── 回合内 tool 结果索引:toolCallId → tool 消息(对齐旧版 HistoryRenderer 的 toolResults) ──
+        const toolResults = new Map<string, Message>();
+        for (const entry of round) {
+          if (entry.kind === 'tool-card') {
+            toolResults.set(entry.msg.toolCallId ?? entry.msg.id, entry.msg);
+          } else if (entry.kind === 'timeline') {
+            for (const m of entry.items) {
+              toolResults.set(m.toolCallId ?? m.id, m);
             }
           }
-        } else if (entry.kind === 'timeline') {
-          // 未被 assistant.tool_calls 消费的普通 tool 消息(实时固化内存消息)→ 退化 timeline
-          const items = entry.items
-            .filter((m) => !consumed.has(m.id))
-            .map(fromToolMessage);
-          if (items.length > 0) {
-            toolCount += items.length;
+        }
+        // 已被 assistant.tool_calls 消费的 tool 消息 id(避免重复渲染)
+        const consumed = new Set<string>();
+
+        // ── 回合处理过程内容(思维链气泡 + 工具时间线/卡片),统一包进 ProcessSection ──
+        const processRows: ReactNode[] = [];
+        let hasThinking = false;
+        let toolCount = 0;
+
+        // 确认后的续流仍属于同一回合,合入现有容器,避免第二个摘要条或裸露的长过程。
+        const continuing = !!tail?.length && !!stream?.length && roundUserId === (lastUser?.serverId ?? lastUser?.id);
+
+        // 回合最终正文段:回合内最后一个 assistant 段(而非 process-body 末尾子元素,
+        // 因回合可能以独立工具卡 / todo_write 收尾)。收起态据此保留该段正文,
+        // 与流式 tail(ChatPanel)对最后一段 assistant 打标记的逻辑保持一致。
+        let finalAssistantId: string | null = null;
+        for (let i = round.length - 1; i >= 0; i--) {
+          const entry = round[i];
+          if (entry.kind === 'assistant') {
+            if (!continuing && !entry.msg.tool_calls?.length) finalAssistantId = entry.msg.id;
+            break;
+          }
+        }
+
+        round.forEach((entry) => {
+          if (entry.kind === 'assistant') {
+            if (entry.msg.reasoning_content) hasThinking = true;
             processRows.push(
-              <ToolTimeline
-                key={`tl-${entry.items[0].id}`}
-                items={items}
+              <MessageBubble
+                key={entry.msg.id}
+                message={entry.msg}
+                dataMessageId={entry.msg.id}
+                className={entry.msg.id === finalAssistantId ? 'round-final-text' : undefined}
               />,
             );
-          }
-        } else {
-          // 独立工具卡片(todo_write / ask_user)——已被 assistant.tool_calls 消费则跳过
-          if (!consumed.has(entry.msg.id)) {
-            toolCount++;
-            // ask_user:以 record(固化携带 question/options/answered)渲染只读卡。
-            // TodoWrite 等其它独立工具仍走 MessageBubble。
-            if (entry.msg.toolName === 'ask_user') {
+
+            // ── 对齐旧版:用 assistant.tool_calls(含完整 args)+ 匹配的 tool 结果重建工具渲染。
+            //    实时流固化的内存消息没有 tool_calls,走下方 timeline/tool-card 退化分支。 ──
+            const calls = entry.msg.tool_calls;
+            if (calls && calls.length > 0) {
+              const tlItems: TimelineToolItem[] = [];
+              for (const tc of calls) {
+                const toolMsg = toolResults.get(tc.id);
+                consumed.add(toolMsg ? toolMsg.id : tc.id);
+                const item = buildToolItemFromCall(tc, toolMsg);
+                if (TIMELINE_STANDALONE_TOOLS.has(item.name)) {
+                  // todo_write / ask_user:渲染完整独立卡片(带 args,todo 树可还原)。
+                  // todo_write 做会话级累计:按 id 深合并增量,每张卡片显示完整累计树(对齐旧版)。
+                  if (item.name === 'todo_write') {
+                    const { mode, todos } = parseTodoArgs(item.args);
+                    todoCache =
+                      mode === 'replace'
+                        ? deepMergeTodoList([], todos)
+                        : deepMergeTodoList(todoCache, todos);
+                    item.args = { mode, todos: todoCache };
+                  }
+                  toolCount++;
+                  processRows.push(
+                    <ToolCardDispatcher key={item.id} record={toolItemToRecord(item)} />,
+                  );
+                } else {
+                  tlItems.push(item);
+                }
+              }
+              if (tlItems.length > 0) {
+                toolCount += tlItems.length;
+                processRows.push(<ToolTimeline key={`tl-${entry.msg.id}`} items={tlItems} />);
+              }
+            }
+          } else if (entry.kind === 'timeline') {
+            // 未被 assistant.tool_calls 消费的普通 tool 消息(实时固化内存消息)→ 退化 timeline
+            const items = entry.items
+              .filter((m) => !consumed.has(m.id))
+              .map(fromToolMessage);
+            if (items.length > 0) {
+              toolCount += items.length;
               processRows.push(
-                <AskUserCard
-                  key={entry.msg.id}
-                  record={{
-                    id: entry.msg.id,
-                    name: 'ask_user',
-                    args: entry.msg.args,
-                    status: entry.msg.success === false ? 'failed' : 'success',
-                    progress: [],
-                    startedAt: entry.msg.timestamp ?? Date.now(),
-                    result: extractText(entry.msg.content),
-                  }}
-                />,
-              );
-            } else {
-              processRows.push(
-                <MessageBubble
-                  key={entry.msg.id}
-                  message={entry.msg}
-                  dataMessageId={entry.msg.id}
+                <ToolTimeline
+                  key={`tl-${entry.items[0].id}`}
+                  items={items}
                 />,
               );
             }
+          } else {
+            // 独立工具卡片(todo_write / ask_user)——已被 assistant.tool_calls 消费则跳过
+            if (!consumed.has(entry.msg.id)) {
+              toolCount++;
+              // ask_user:以 record(固化携带 question/options/answered)渲染只读卡。
+              // TodoWrite 等其它独立工具仍走 MessageBubble。
+              if (entry.msg.toolName === 'ask_user') {
+                processRows.push(
+                  <AskUserCard
+                    key={entry.msg.id}
+                    record={{
+                      id: entry.msg.id,
+                      name: 'ask_user',
+                      args: entry.msg.args,
+                      status: entry.msg.success === false ? 'failed' : 'success',
+                      progress: [],
+                      startedAt: entry.msg.timestamp ?? Date.now(),
+                      result: extractText(entry.msg.content),
+                    }}
+                  />,
+                );
+              } else {
+                processRows.push(
+                  <MessageBubble
+                    key={entry.msg.id}
+                    message={entry.msg}
+                    dataMessageId={entry.msg.id}
+                  />,
+                );
+              }
+            }
           }
-        }
-      });
+        });
 
-      // ── 回合处理过程统一收起:仅当有思考或工具时包 ProcessSection(纯文本回合不显示摘要条)。
-      //    收起态隐藏思维链 + 工具卡,回合最终正文(content 气泡)不受影响。
-      const anchor =
-        round[0].kind === 'timeline' ? round[0].items[0].id : round[0].msg.id;
-      // 回合级稳定 key:与流式 tail(ChatPanel)一致,作为收起状态的独立维度
-      const roundKey = roundUserId ?? anchor;
-      const wrapRound = processRows.length > 0 && (hasThinking || toolCount > 0);
-      if (wrapRound) {
-        // key 用回合级 user 消息 id,与流式 tail ChatPanel 的 key 一致,
-        // 同一回合内多次 thinking 不改变 key,避免 DOM 卸载重挂导致摘要条闪现。
-        rows.push(
-          <ProcessSection
-            key={`process-${roundKey}`}
-            collapsed={collapsedRounds[roundKey] ?? getDefaultProcessCollapsed()}
-            onToggle={() => toggleRoundCollapsed(roundKey)}
-            hasThinking={hasThinking}
-            toolCount={toolCount}
-            elapsedMs={computeRoundElapsed(round)}
-          >
-            {processRows}
-          </ProcessSection>,
-        );
-      } else {
-        rows.push(...processRows);
+        if (continuing) {
+          processRows.push(...tail!);
+          tailConsumed = true;
+          hasThinking ||= !!isReasoning || stream.some((item) => item.kind === 'assistant' && !!item.reasoning);
+          // 流式 toolCalls 可能还携带已固化的记录,只累计新增的调用。
+          const committedToolIds = new Set(toolResults.keys());
+          toolCount += toolCalls.filter((tool) => !committedToolIds.has(tool.id)).length;
+        }
+
+        // ── 回合处理过程统一收起:仅当有思考或工具时包 ProcessSection(纯文本回合不显示摘要条)。
+        //    收起态隐藏思维链 + 工具卡,回合最终正文(content 气泡)不受影响。
+        const anchor =
+          round[0].kind === 'timeline' ? round[0].items[0].id : round[0].msg.id;
+        // 回合级稳定 key:与流式 tail(ChatPanel)一致,作为收起状态的独立维度
+        const roundKey = roundUserId ?? anchor;
+        const wrapRound = processRows.length > 0 && (hasThinking || toolCount > 0);
+        if (wrapRound) {
+          // key 用回合级 user 消息 id,与流式 tail ChatPanel 的 key 一致,
+          // 同一回合内多次 thinking 不改变 key,避免 DOM 卸载重挂导致摘要条闪现。
+          rows.push(
+            <ProcessSection
+              key={`process-${roundKey}`}
+              collapsed={collapsedRounds[roundKey] ?? (processView !== 'full')}
+              onToggle={() => toggleRoundCollapsed(roundKey)}
+              hasThinking={hasThinking}
+              toolCount={toolCount}
+              elapsedMs={continuing && processStartedAt != null
+                ? Math.max(0, (isSending ? Date.now() : processEndedAt ?? Date.now()) - processStartedAt)
+                : computeRoundElapsed(round)}
+              streaming={continuing && isSending}
+            >
+              {processRows}
+            </ProcessSection>,
+          );
+        } else {
+          rows.push(...processRows);
+        }
+
       }
 
       // ── 回合级 footer:渲染在回合所有条目(assistant + 工具卡 + ask 卡)之后,作整回合的收尾操作条。
@@ -513,6 +556,7 @@ export const HistoryRenderer = forwardRef<HistoryRendererHandle, HistoryRenderer
       roundText = '';
       roundFiles = [];
       roundUserId = null;
+      roundRenderId = null;
       roundUserContent = null;
     };
 
@@ -544,6 +588,7 @@ export const HistoryRenderer = forwardRef<HistoryRendererHandle, HistoryRenderer
         // 乐观追加的 user 消息 id 是 local-* 临时值(渲染 key 稳定用),回滚/分叉
         // 必须用后端真实 uuid(serverId)才能在后端 JSONL 定位,故优先取 serverId。
         roundUserId = m.serverId ?? m.id;
+        roundRenderId = m.id;
         roundUserContent = extractText(m.content);
         // 仅当非发送中(isSending)且该消息为最后一条 user 且其后无产出时,显示消息级撤回按钮
         const withdrawable = !isSending && m === lastUser && !lastUserTailProduced;

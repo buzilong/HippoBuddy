@@ -17,7 +17,7 @@ import { ImageBackgroundCropModal } from './ImageBackgroundCropModal';
 import { useAccentStore } from '@/stores/accentStore';
 import { showToast } from './toastStore';
 import { i18nStore, useI18n, translate } from '@/i18n';
-import { setDefaultProcessView } from '@/utils/process-view-config';
+import { setDefaultProcessView, normalizeProcessView, type ProcessView } from '@/utils/process-view-config';
 import type { UiConfigSection, ToolsConfigSection } from '@/types/config';
 
 /** 文件夹图标(对齐旧版 settings-input-btn 浏览按钮) */
@@ -145,8 +145,8 @@ export function GeneralSettingsPage() {
   const [dataDirRestartMsg, setDataDirRestartMsg] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  /** 回合默认展示模式:full=完整展示处理过程;result=只展示最终结果 */
-  const [processView, setProcessView] = useState<'full' | 'result'>('full');
+  /** 回合默认展示模式:auto=自动折叠;full=完整过程;result=只看结果 */
+  const [processView, setProcessView] = useState<ProcessView>('auto');
   /** 权限范围:strict=仅工作区;relaxed=放开整机访问 */
   const [scopeMode, setScopeMode] = useState<'strict' | 'balanced' | 'relaxed'>('strict');
   /** 推荐问答开关:回合结束后是否用 LLM 生成推荐问题 */
@@ -190,7 +190,7 @@ export function GeneralSettingsPage() {
           setDataDir(dd.value.path || '');
         }
         if (cfg.status === 'fulfilled') {
-          const v = (cfg.value.ui?.default_process_view === 'result' ? 'result' : 'full');
+          const v = normalizeProcessView(cfg.value.ui?.default_process_view);
           setProcessView(v);
           setDefaultProcessView(v);
           const m = cfg.value.tools?.mode;
@@ -215,7 +215,7 @@ export function GeneralSettingsPage() {
     };
   }, []);
 
-  const handleProcessViewChange = async (value: 'full' | 'result') => {
+  const handleProcessViewChange = async (value: ProcessView) => {
     if (value === processView) return;
     setProcessView(value);
     setDefaultProcessView(value);
@@ -228,7 +228,9 @@ export function GeneralSettingsPage() {
       };
       await configApi.updateFull({ ui });
       showToast(
-        value === 'result'
+        value === 'auto'
+          ? t('settingsPage.generalProcessViewSavedAuto')
+          : value === 'result'
           ? t('settingsPage.generalProcessViewSavedResult')
           : t('settingsPage.generalProcessViewSavedFull'),
         { type: 'success', duration: 2000 },
@@ -679,6 +681,13 @@ export function GeneralSettingsPage() {
             </div>
             <div className="settings-field-body">
               <div className="settings-toggle-group">
+                <button
+                  type="button"
+                  className={`settings-toggle-btn${processView === 'auto' ? ' active' : ''}`}
+                  onClick={() => handleProcessViewChange('auto')}
+                >
+                  {t('settingsPage.generalProcessViewAuto')}
+                </button>
                 <button
                   type="button"
                   className={`settings-toggle-btn${processView === 'full' ? ' active' : ''}`}

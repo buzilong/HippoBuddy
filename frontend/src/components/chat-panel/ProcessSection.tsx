@@ -1,5 +1,5 @@
 /**
- * ProcessSection - 回合级「处理过程」折叠容器(统一收起按钮)
+ * ProcessSection - full/result 模式的回合级处理过程容器(auto 使用 ConversationFlow)
  *
  * 把一个回合的整个处理过程(思维链 reasoning + 工具调用 tool-cards/timeline)
  * 包成一个整体,头部是统一的摘要条(即收起按钮),点击在「展开完整过程」与
@@ -39,7 +39,7 @@ export interface ProcessSectionProps {
   toolCount: number;
   /** 本回合处理过程总耗时(ms,null 表示无法计算) */
   elapsedMs: number | null;
-  /** 是否处于流式输出中:收起态下隐藏所有正文只留摘要条,固化后显示最终正文 */
+  /** 是否处于流式输出中(用于摘要状态文案) */
   streaming?: boolean;
   /** 回合内过程内容(思维链气泡 + 工具时间线/卡片),最终正文不在此段被隐藏 */
   children: ReactNode;

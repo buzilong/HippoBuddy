@@ -215,7 +215,7 @@ describe('GeneralSettingsPage 默认展示模式 / 权限范围', () => {
   it('重复点击当前展示模式 → 不触发保存与 toast', async () => {
     render(<GeneralSettingsPage />);
     await screen.findByText(k('settingsPage.generalTitle'));
-    fireEvent.click(screen.getByRole('button', { name: k('settingsPage.generalProcessViewFull') }));
+    fireEvent.click(screen.getByRole('button', { name: k('settingsPage.generalProcessViewAuto') }));
     await act(async () => {});
     expect(configApi.updateFull).not.toHaveBeenCalled();
     expect(toast.showToast).not.toHaveBeenCalled();
@@ -255,6 +255,15 @@ describe('GeneralSettingsPage 默认展示模式 / 权限范围', () => {
       type: 'success',
       duration: 2000,
     });
+  });
+
+  it('saves automatic mode without overwriting other UI preferences', async () => {
+    configApi.getFull.mockResolvedValue({ ui: { default_process_view: 'full', theme: 'dark' } });
+    render(<GeneralSettingsPage />);
+    await act(async () => {});
+    fireEvent.click(screen.getByRole('button', { name: k('settingsPage.generalProcessViewAuto') }));
+    await act(async () => {});
+    expect(lastUpdate()[0].ui).toMatchObject({ default_process_view: 'auto', theme: 'dark' });
   });
 });
 

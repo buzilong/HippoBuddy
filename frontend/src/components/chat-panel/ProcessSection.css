@@ -81,13 +81,6 @@
   display: none;
 }
 
-/* 流式中收起(streaming):隐藏所有 assistant 正文(含当前输出段),只留摘要条,
-   避免流式推进时「最后一段」随 thinking 切换导致中途 content 闪现又消失;
-   done 固化后(无 streaming)恢复显示最终正文。 */
-.process-section.collapsed.streaming .process-body > .msg-bubble-assistant {
-  display: none;
-}
-
 /* ── 折叠容器内部间距修正 ────────────────────────────────
    .history-list 对 .tool-timeline 用了 -16px 负 margin 抵消 16px gap,
    该规则是后代选择器,会连带作用到 process-body 内的工具时间线,

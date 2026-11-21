@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { getDefaultProcessCollapsed, setDefaultProcessView } from '@/utils/process-view-config';
+import { getDefaultProcessCollapsed, setDefaultProcessView, normalizeProcessView, hasStreamingAnswer } from '@/utils/process-view-config';
 
 describe('process-view-config', () => {
   beforeEach(() => {
@@ -16,15 +16,33 @@ describe('process-view-config', () => {
     expect(getDefaultProcessCollapsed()).toBe(true);
   });
 
-  it('兜底:未知值按 full 处理', () => {
+  it('兜底:未知值按 auto 处理', () => {
     setDefaultProcessView('whatever');
-    expect(getDefaultProcessCollapsed()).toBe(false);
+    expect(getDefaultProcessCollapsed()).toBe(true);
   });
 
-  it('空值/undefined/null 按 full 处理', () => {
+  it('空值/undefined/null 按 auto 处理', () => {
     setDefaultProcessView(undefined);
-    expect(getDefaultProcessCollapsed()).toBe(false);
+    expect(getDefaultProcessCollapsed()).toBe(true);
     setDefaultProcessView('asdf');
-    expect(getDefaultProcessCollapsed()).toBe(false);
+    expect(getDefaultProcessCollapsed()).toBe(true);
+  });
+});
+
+describe('process mode compatibility', () => {
+  it('configuration defaults to auto and preserves explicit legacy modes', () => {
+    expect(normalizeProcessView(undefined)).toBe('auto');
+    expect(normalizeProcessView(null)).toBe('auto');
+    expect(normalizeProcessView('full')).toBe('full');
+    expect(normalizeProcessView('result')).toBe('result');
+  });
+
+  it('only a current assistant text segment starts an answer', () => {
+    const text = { kind: 'assistant', turn: 1, text: 'answer' };
+    expect(hasStreamingAnswer([text], false, [])).toBe(true);
+    expect(hasStreamingAnswer([text], true, [])).toBe(false);
+    expect(hasStreamingAnswer([text, { kind: 'tool', turn: 1 }], false, [])).toBe(false);
+    expect(hasStreamingAnswer([text], false, [{ status: 'running' }])).toBe(false);
+    expect(hasStreamingAnswer([text], false, [], true)).toBe(false);
   });
 });

@@ -1,3 +1,4 @@
+import { setDefaultProcessView } from '@/utils/process-view-config';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, fireEvent, act } from '@testing-library/react';
 import { createRef } from 'react';
@@ -8,6 +9,8 @@ const { state } = vi.hoisted(() => ({
   state: {
     messages: [] as unknown[],
     currentSessionId: 's1',
+    sending: false,
+    stream: [] as { kind: 'assistant'; turn: number; text: string; reasoning: string }[],
     t: (key: string, params?: Record<string, string | number>) =>
       params && params.count != null ? `${key}:${params.count}` : key,
   },
@@ -16,9 +19,10 @@ const { state } = vi.hoisted(() => ({
 vi.mock('@/hooks/useSessionStream', () => ({
   useSessionStream: () => ({
     messages: state.messages,
+    stream: state.stream,
     isLoadingMessages: false,
     error: null,
-    isSending: false,
+    isSending: state.sending,
     toolCalls: [],
     askUserData: null,
     waitingForUser: false,
@@ -39,7 +43,12 @@ vi.mock('@/stores/appStore', () => ({
 
 vi.mock('@/i18n', () => ({ useI18n: () => ({ t: state.t }) }));
 
-vi.mock('@/utils/process-view-config', () => ({ getDefaultProcessCollapsed: () => false }));
+beforeEach(() => setDefaultProcessView('full'));
+
+vi.mock('@/utils/process-view-config', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/utils/process-view-config')>(),
+  getDefaultProcessCollapsed: () => false,
+}));
 
 vi.mock('@/components/chat-panel/MessageBubble', () => ({
   MessageBubble: ({ message }: { message: { id: string } }) => (
@@ -87,6 +96,7 @@ function buildMessages(rounds: number): Message[] {
 describe('HistoryRenderer 历史窗口化', () => {
   beforeEach(() => {
     state.currentSessionId = 's1';
+    state.stream = [];
     state.messages = buildMessages(40);
   });
 
@@ -130,5 +140,58 @@ describe('HistoryRenderer 历史窗口化', () => {
     });
     expect(container.querySelector('[data-message-id="u1"]')).not.toBeNull();
     expect(container.querySelector('.history-load-earlier')).toBeNull();
+  });
+});
+
+
+it('confirmation continuation stays inside the existing round container', () => {
+  state.messages = [
+    { id: 'u1', role: 'user', content: 'q' },
+    { id: 'a1', role: 'assistant', content: 'working', reasoning_content: 'plan' },
+  ];
+  state.stream = [{ kind: 'assistant', turn: 2, text: '', reasoning: 'continue' }];
+  const { container } = render(<HistoryRenderer tail={[<div key="continuation" data-testid="continuation" />]} />);
+  const committed = container.querySelector('[data-message-id="a1"]')!;
+  const continuation = container.querySelector('[data-testid="continuation"]')!;
+  expect(continuation.parentElement).toBe(committed.parentElement);
+  expect(container.querySelectorAll('[data-testid="continuation"]')).toHaveLength(1);
+});
+
+
+describe('HistoryRenderer automatic interleaving', () => {
+  beforeEach(() => {
+    setDefaultProcessView('auto');
+    state.sending = true;
+    state.stream = [];
+    state.messages = [{ id: 'u-auto', role: 'user', content: 'analyze' }];
+  });
+
+  it('renders the first live segment even when no assistant messages have committed yet', () => {
+    state.stream = [{ kind: 'assistant', turn: 5, text: 'streaming reply', reasoning: 'plan' }];
+    const { container } = render(<HistoryRenderer />);
+    expect(container.querySelector('[data-message-id="s-5-0"]')).not.toBeNull();
+    expect(container.querySelectorAll('.conversation-process')).toHaveLength(1);
+  });
+
+  it('keeps the same flow component and text node across the commit', () => {
+    state.stream = [{ kind: 'assistant', turn: 5, text: 'streaming reply', reasoning: 'plan' }];
+    const { container, rerender } = render(<HistoryRenderer />);
+    const text = container.querySelector('[data-message-id="s-5-0"]');
+    state.messages = [...state.messages, { id: 's-5-0', role: 'assistant', content: 'streaming reply', reasoning_content: 'plan' }];
+    state.stream = [];
+    state.sending = false;
+    rerender(<HistoryRenderer />);
+    expect(container.querySelector('[data-message-id="s-5-0"]')).toBe(text);
+    expect(container.querySelectorAll('.conversation-process')).toHaveLength(1);
+  });
+
+  it('keeps source and continuation text in the same flow without a round wrapper', () => {
+    state.messages = [...state.messages, { id: 'a-auto', role: 'assistant', content: 'first', reasoning_content: 'plan' }];
+    state.stream = [{ kind: 'assistant', turn: 6, text: 'second', reasoning: 'continue' }];
+    const { container } = render(<HistoryRenderer />);
+    expect(container.querySelector('[data-message-id="a-auto"]')).not.toBeNull();
+    expect(container.querySelector('[data-message-id="s-6-0"]')).not.toBeNull();
+    expect(container.querySelectorAll('.conversation-process')).toHaveLength(2);
+    expect(container.querySelector('.process-section')).toBeNull();
   });
 });

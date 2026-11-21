@@ -193,6 +193,8 @@ export interface SessionStreamState {
   processStartedAt?: number;
   /** 当前回合处理过程结束时间(最后一个 tool_result / reasoning_done / done) */
   processEndedAt?: number;
+  /** 当前回合是否被用户中断(仅运行时展示状态)。 */
+  processInterrupted?: boolean;
   /**
    * 推荐问题(回合 done 后异步生成,见 /api/suggestions)。
    * 空数组表示无推荐或已被用户消费;新回合开始时重置。
@@ -763,6 +765,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         // 新请求开始,重置处理过程计时(thinking/tool_start 事件会重新写入)
         s.processStartedAt = undefined;
         s.processEndedAt = undefined;
+        s.processInterrupted = false;
         // 新回合开始,清除上一回合的推荐问题(异步拉取结果也随即作废)
         s.suggestions = [];
         s.suggestionsLoading = false;
@@ -863,6 +866,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           console.warn('[chatStore] 后端 abortTool 调用失败:', e);
         });
       // 3. 提交已累积的半成品内容 + 结束发送状态
+      updateSession(sid, (s) => { s.processInterrupted = true; });
       get().commitStreamingMessage(sid);
       updateSession(sid, (s) => {
         s.isSending = false;
@@ -962,6 +966,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           const payload = data as ChatSseEventMap['content'];
           updateSession(sid, (s) => {
             const chunk = payload.content;
+            s.isReasoning = false;
             // 已恢复输出,重试提示不再需要
             s.retryNotice = null;
             s.stream = appendToLastAssistant(
@@ -985,6 +990,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         case 'tool_start': {
           const payload = data as ChatSseEventMap['tool_start'];
           updateSession(sid, (s) => {
+            s.isReasoning = false;
             s.retryNotice = null;
             // 无 thinking 事件(思考被禁用等)的回合,以首个工具开始作为过程起点
             if (s.processStartedAt == null) s.processStartedAt = Date.now();

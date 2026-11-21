@@ -1,23 +1,42 @@
-/**
- * 回合默认展示模式 —— 进程内缓存。
- *
- * 语义对应后端 ui.default_process_view('full'|'result')与设置页「通用」中的
- * 默认展示模式开关:决定**每个新建回合**处理过程的初始收起状态(absent 时作为兜底)。
- * - full   :完整展示处理过程(默认展开) → collapsed = false
- * - result :只展示最终结果(默认收起)   → collapsed = true
- *
- * 不用全局 config store,沿用 PermissionBadge「组件自读 configApi + 写缓存」的模式:
- * ChatPanel 挂载时(GET /api/config)与设置页变更时都会 setDefaultProcessView;
- * chatStore 创建会话分区时经 getDefaultProcessCollapsed() 同步读取默认值。
- */
-let defaultProcessView = 'full';
+import { useSyncExternalStore } from 'react';
 
-/** 是否应默认收起处理过程(new result → true,否则 false) */
-export function getDefaultProcessCollapsed(): boolean {
-  return defaultProcessView === 'result';
+export type ProcessView = 'auto' | 'full' | 'result';
+let defaultProcessView: ProcessView = 'auto';
+const listeners = new Set<() => void>();
+
+export function normalizeProcessView(view: string | undefined | null): ProcessView {
+  return view === 'full' || view === 'result' ? view : 'auto';
 }
 
-/** 同步默认展示模式('full' | 'result',兜底其余值按 full 处理) */
+export function getDefaultProcessCollapsed(): boolean {
+  return defaultProcessView !== 'full';
+}
+
 export function setDefaultProcessView(view: string | undefined | null): void {
-  defaultProcessView = view === 'result' ? 'result' : 'full';
+  const next = normalizeProcessView(view);
+  if (next === defaultProcessView) return;
+  defaultProcessView = next;
+  listeners.forEach((listener) => listener());
+}
+
+const subscribe = (listener: () => void) => {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+};
+
+/** 配置异步加载或在设置页切换后,已挂载的过程也立即更新。 */
+export function useProcessView(): ProcessView {
+  return useSyncExternalStore(subscribe, () => defaultProcessView);
+}
+
+/** full/result 模式下当前可显示的正文;auto 不依赖最终回答的推断。 */
+export function hasStreamingAnswer(
+  stream: readonly { kind: string; turn: number; text?: string }[],
+  isReasoning: boolean,
+  tools: readonly { status: string }[],
+  webSearching = false,
+) {
+  const tail = stream[stream.length - 1];
+  return tail?.kind === 'assistant' && !!tail.text && !isReasoning
+    && !webSearching && !tools.some((tool) => tool.status === 'running' || tool.status === 'pending_confirmation');
 }

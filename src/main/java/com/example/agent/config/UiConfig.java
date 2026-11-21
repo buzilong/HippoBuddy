@@ -13,11 +13,11 @@ public class UiConfig {
     private static final String DEFAULT_PROMPT = "agent";
 
     /**
-     * 默认展示模式:full=完整展示处理过程(思考+工具,收起展开);result=只展示最终结果(默认收起)。
+     * 默认展示模式:auto=当前步骤自动展开、完成后收起(默认);full=完整展示处理过程(思考+工具,收起展开);result=只展示最终结果(默认收起)。
      * 对应前端 ChatPanel 回合折叠容器 processCollapsed 的初始值。
      */
     @JsonProperty("default_process_view")
-    private String defaultProcessView = "full";
+    private String defaultProcessView = "auto";
 
     private String theme = DEFAULT_THEME;
     private String prompt = DEFAULT_PROMPT;

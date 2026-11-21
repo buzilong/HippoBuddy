@@ -1,3 +1,4 @@
+import { setDefaultProcessView } from '@/utils/process-view-config';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { ToolTimeline } from '@/components/tool-renderers/ToolTimeline';
@@ -60,6 +61,7 @@ const readItem: TimelineToolItem = {
 };
 
 beforeEach(() => {
+  setDefaultProcessView('full');
   vi.clearAllMocks();
 });
 
